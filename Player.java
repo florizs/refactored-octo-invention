@@ -617,7 +617,7 @@ public final class Player extends Playable {
 			return;
 		}
 		
-		if ((pet && getPet() != null && getPet().isDead()) || (!pet && isDead())) {
+		if ((pet && hasSummon() && getPet().isDead()) || (!pet && isDead())) {
 			_reviveRequested = 1;
 			_revivePower = isPhoenixBlessed() ? 100 : isAffected(L2EffectFlag.CHARM_OF_COURAGE) ? 0 : Formulas.calculateSkillResurrectRestorePercent(skill.getPower(), reviver);
 			_revivePet = pet;
@@ -1725,7 +1725,7 @@ public final class Player extends Playable {
 		if (count > item.getCount())
 			return null;
 
-		if (getPet() != null && getPet().getControlItemId() == objectId || _mountObjectId == objectId) // Pet is summoned and not the item that summoned the pet AND not the buggle from strider you're mounting
+		if (hasSummon() && getPet().getControlItemId() == objectId || _mountObjectId == objectId) // Pet is summoned and not the item that summoned the pet AND not the buggle from strider you're mounting
 			return null;
 
 		if (getActiveEnchantItem() != null && getActiveEnchantItem().getObjectId() == objectId)
@@ -1750,7 +1750,7 @@ public final class Player extends Playable {
 			return null;
 		
 		// Pet whom item you try to manipulate is summoned/mounted.
-		if (getPet() != null && getPet().getControlItemId() == objectId || _mountObjectId == objectId)
+		if (hasSummon() && getPet().getControlItemId() == objectId || _mountObjectId == objectId)
 			return null;
 		
 		// Item is under enchant process.
@@ -2455,6 +2455,10 @@ public final class Player extends Playable {
 	
 	private Summon _summon;
 
+	public boolean hasSummon() {
+		return getPet() != null;
+	}
+
 	public boolean hasPet() {
 		return _summon instanceof Pet;
 	}
@@ -2469,7 +2473,7 @@ public final class Player extends Playable {
 	
 	/** Unsummon all types of summons : pets, cubics, normal summons and trained beasts. */
 	public void dropAllSummons() {
-		if (getPet() != null)
+		if (hasSummon())
 			getPet().unSummon(this); // Delete summons and pets
 
 		if (getTrainedBeast() != null)
@@ -2571,7 +2575,7 @@ public final class Player extends Playable {
 		if (!isMounted())
 			return;
 
-		if (getPet() != null) {
+		if (hasSummon()) {
 			setCurrentFeed(((Pet) getPet()).getCurrentFed());
 			_controlItemId = getPet().getControlItemId();
 			stopFeeding();
@@ -3920,20 +3924,17 @@ public final class Player extends Playable {
 		return _pvpFlag > 0;
 	}
 	
-	public void setPvpFlag(int pvpFlag) {
-		_pvpFlag = (byte) pvpFlag;
+	public void setPvpFlag(byte pvpFlag) {
+		_pvpFlag = pvpFlag;
 	}
 
-	public void updatePvPFlag(int value) {
+	private void updatePvPFlag(int value) {
 		if (_pvpFlag == value)
 			return;
 
 		setPvpFlag(value);
 		sendUserInfo();
-		
-		if (getPet() != null)
-			sendPacket(new RelationChanged(getPet(), getRelation(this), false));
-		
+		sendPetRelationChangeTo(this, getRelation(this), false);
 		broadcastRelationsChanges();
 	}
 	
@@ -3982,10 +3983,7 @@ public final class Player extends Playable {
 	/** Send StatusUpdate packet with Karma to the Player and all Player to inform (broadcast). */
 	public void broadcastKarma() {
 		statusUpdate(this, StatusUpdate.KARMA, _karma);
-
-		if (getPet() != null)
-			sendPacket(new RelationChanged(getPet(), getRelation(this), false));
-
+		sendPetRelationChangeTo(this, getRelation(this), false);
 		broadcastRelationsChanges();
 	}
 	
@@ -6009,12 +6007,7 @@ public final class Player extends Playable {
 	public final void broadcastCharInfo() {
 		for (Player player : getKnownType(Player.class)) {
 			player.sendPacket(new CharInfo(this));
-			final int relation = getRelation(player);
-			final boolean isAutoAttackable = isAutoAttackable(player);
-			player.sendPacket(new RelationChanged(this, relation, isAutoAttackable));
-
-			if (getPet() != null)
-				player.sendPacket(new RelationChanged(getPet(), relation, isAutoAttackable));
+			sendRelationChangesTo(player);
 		}
 	}
 	
@@ -6099,6 +6092,22 @@ public final class Player extends Playable {
 		}
 		
 		return result;
+	}
+	
+	private void sendRelationChangesTo(Player player) {
+		int relation = getRelation(player);
+		boolean isAutoAttackable = isAutoAttackable(player);
+		sendRelationChangedPacket(player, this, relation, isAutoAttackable);
+		sendPetRelationChangeTo(player, relation, isAutoAttackable);
+	}
+	
+	private void sendPetRelationChangeTo(Player player, int relation, boolean isAutoAttackable) {
+		if (hasSummon())
+			sendRelationChangedPacket(player, getPet(), relation, isAutoAttackable);
+	}
+
+	private void sendRelationChangedPacket(Player receiver, L2Character character, int relation, boolean isAutoAttackable) {
+		receiver.sendPacket(new RelationChanged(character, relation, isAutoAttackable));
 	}
 	
 	/** Restores secondary data for the Player, based on the current class index. */
@@ -6215,7 +6224,7 @@ public final class Player extends Playable {
 
 			if (isMounted())
 				dismount(); // Dismount the player.
-			else if (getPet() != null)
+			else if (hasSummon())
 				getPet().unSummon(this); // If the Player has a summon, unsummon it.
 
 			// Stop all scheduled tasks.
@@ -6686,30 +6695,21 @@ public final class Player extends Playable {
 		if (isInsideZone(ZoneId.PVP))
 			return;
 
-		PvpFlagTaskManager.getInstance().add(this, Config.PVP_NORMAL_TIME);
-
-		if (!isFlagged())
-			updatePvPFlag(1);
+		updatePvPFlagTime(false);
 	}
 	
 	public void updatePvPStatus(Creature targetPlayer) {
-		final Player target = targetPlayer.getActingPlayer();
+		Player target = targetPlayer.getActingPlayer();
 
-		if (target == null)
+		if (target == null || !isSameFaction(target) || target.hasKarma() || (isInDuel() && target.getDuelId() == getDuelId()) || (isInsideZone(ZoneId.PVP) && target.isInsideZone(ZoneId.PVP)))
 			return;
 
-		if (isInDuel() && target.getDuelId() == getDuelId())
-			return;
-		
-		if (!isSameFaction(target))
-			return;
-
-		if ((!isInsideZone(ZoneId.PVP) || !target.isInsideZone(ZoneId.PVP)) && !target.hasKarma()) {
-			PvpFlagTaskManager.getInstance().add(this, checkIfPvP(target) ? Config.PVP_PVP_TIME : Config.PVP_NORMAL_TIME);
-
-			if (!isFlagged())
-				updatePvPFlag(1);
-		}
+		updatePvPFlagTime(checkIfPvP(target));
+	}
+	
+	private void updatePvPFlagTime(boolean isPvP) {
+		PvpFlagTaskManager.getInstance().add(this, isPvP ? Config.PVP_PVP_TIME : Config.PVP_NORMAL_TIME);
+		updatePvPFlag(1);
 	}
 	/** PvP Actions */
 	
@@ -6768,205 +6768,74 @@ public final class Player extends Playable {
 	}
 	
 	@Override
-	public void addFuncsToNewCharacter() {
-		super.addFuncsToNewCharacter(); // Add Creature functionalities.
-		addStatFunc(FuncHennaSTR.getInstance());
-		addStatFunc(FuncHennaINT.getInstance());
-		addStatFunc(FuncHennaDEX.getInstance());
-		addStatFunc(FuncHennaWIT.getInstance());
-		addStatFunc(FuncHennaCON.getInstance());
-		addStatFunc(FuncHennaMEN.getInstance());
-	}
+	public void sendInfo(Player activeChar) {
+		if (isInBoat())
+			getPosition().set(getBoat().getPosition());
 
-	@Override
-	protected void initCharStatusUpdateValues() {
-		super.initCharStatusUpdateValues();
-		_cpUpdateInterval = getMaxCp() / 352.0;
-		_cpUpdateIncCheck = getMaxCp();
-		_cpUpdateDecCheck = getMaxCp() - _cpUpdateInterval;
-		_mpUpdateInterval = getMaxMp() / 352.0;
-		_mpUpdateIncCheck = getMaxMp();
-		_mpUpdateDecCheck = getMaxMp() - _mpUpdateInterval;
-	}
-
-	@Override
-	public void initCharStat() {
-		setStat(new PlayerStat(this));
-	}
-
-	@Override
-	public final PlayerStat getStat() {
-		return (PlayerStat) super.getStat();
-	}
-
-	@Override
-	public void initCharStatus() {
-		setStatus(new PlayerStatus(this));
-	}
-
-	@Override
-	public final PlayerStatus getStatus() {
-		return (PlayerStatus) super.getStatus();
-	}
-
-	@Override
-	public final PlayerTemplate getTemplate() {
-		return (PlayerTemplate) super.getTemplate();
-	}
-
-	@Override
-	public CreatureAI getAI() {
-		CreatureAI ai = _ai;
-
-		if (ai == null) {
-			synchronized (this) {
-				if (_ai == null)
-					_ai = new PlayerAI(this);
-
-				return _ai;
+		if (isPolyTypeNPC()) {
+			activeChar.sendPacket(sendMorphInfo());
+		} else {
+			activeChar.sendPacket(new CharInfo(this));
+			
+			if (isSeated()) {
+				final WorldObject object = World.getInstance().getObject(_throneId);
+				
+				if (object instanceof StaticObject)
+					activeChar.sendPacket(new ChairSit(getObjectId(), ((StaticObject) object).getStaticObjectId()));
 			}
 		}
 
-		return ai;
-	}
+		sendRelationChangesTo(activeChar);
+		activeChar.sendRelationChangesTo(this);
 
-	@Override
-	public final int getLevel() {
-		return getStat().getLevel();
-	}
+		if (isInBoat())
+			activeChar.sendPacket(new GetOnVehicle(getObjectId(), getBoat().getObjectId(), getBoatPosition()));
 
-	@Override
-	public byte getPvpFlag() {
-		return _pvpFlag;
-	}
-
-	@Override
-	public boolean hasKarma() {
-		return _karma > 0;
+		switch (getStoreType()) {
+			case SELL:
+			case PACKAGE_SELL:
+				activeChar.sendPacket(new PrivateStoreMsgSell(this));
+				return;
+			case BUY:
+				activeChar.sendPacket(new PrivateStoreMsgBuy(this));
+				return;
+			case MANUFACTURE:
+				activeChar.sendPacket(new RecipeShopMsg(this));
+			default:
+				return;
+		}
 	}
 	
 	@Override
-	public int getKarma() {
-		return _karma;
-	}
+	public final void onTeleported() {
+		super.onTeleported();
+		
+		if (Config.PLAYER_SPAWN_PROTECTION > 0) {
+			setSpawnProtection(true);
+			startAbnormalEffect(PlayerUtils.ABNORMAL_EFFECT_TELEPORT);
+		}
 
-	@Override
-	public void revalidateZone(boolean force) {
-		super.revalidateZone(force);
+		if (!isGM())
+			stopAllToggles();
 
-		if (Config.ALLOW_WATER) {
-			if (isInsideZone(ZoneId.WATER))
-				WaterTaskManager.getInstance().add(this);
-			else
-				WaterTaskManager.getInstance().remove(this);
+		if (getTrainedBeast() != null) {
+			getTrainedBeast().getAI().stopFollow();
+			getTrainedBeast().teleToLocation(getPosition(), 0);
+			getTrainedBeast().getAI().startFollow(this);
 		}
 		
-		if (isInsideZone(ZoneId.SIEGE)) {
-			if (_lastCompassZone == ExSetCompassZoneCode.SIEGEWARZONE2)
-				return;
-
-			_lastCompassZone = ExSetCompassZoneCode.SIEGEWARZONE2;
-			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.SIEGEWARZONE2));
-		} else if (isInsideZone(ZoneId.PVP)) {
-			if (_lastCompassZone == ExSetCompassZoneCode.PVPZONE)
-				return;
-
-			_lastCompassZone = ExSetCompassZoneCode.PVPZONE;
-			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.PVPZONE));
-		} else if (isInsideZone(ZoneId.PEACE)) {
-			if (_lastCompassZone == ExSetCompassZoneCode.PEACEZONE)
-				return;
-
-			_lastCompassZone = ExSetCompassZoneCode.PEACEZONE;
-			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.PEACEZONE));
-		} else {
-			if (_lastCompassZone == ExSetCompassZoneCode.GENERALZONE)
-				return;
-
-			if (_lastCompassZone == ExSetCompassZoneCode.SIEGEWARZONE2)
-				updatePvPStatus();
-
-			_lastCompassZone = ExSetCompassZoneCode.GENERALZONE;
-			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.GENERALZONE));
-		}
-	}
-
-	@Override
-	public PcInventory getInventory() {
-		return _inventory;
-	}
-
-	/**
-	 * Destroys item from inventory and send InventoryUpdate packet to the Player.
-	 * @param process String Identifier of process triggering this action
-	 * @param objectId int Item Instance identifier of the item to be destroyed
-	 * @param count int Quantity of items to be destroyed
-	 * @param reference WorldObject Object referencing current action like NPC selling item or previous item in transformation
-	 * @param sendMessage boolean Specifies whether to send message to Client about this action
-	 * @return boolean informing if the action was successfull
-	 */
-	@Override
-	public boolean destroyItem(String process, int objectId, int count, WorldObject reference, boolean sendMessage) {
-		final ItemInstance item = _inventory.getItemByObjectId(objectId);
+		Summon pet = getPet();
 		
-		if (item == null) {
-			if (sendMessage)
-				sendPacket(SystemMessageId.NOT_ENOUGH_ITEMS);
-
-			return false;
+		if (pet != null) {
+			pet.setFollowStatus(false);
+			pet.teleToLocation(getPosition(), 0);
+			((SummonAI) pet.getAI()).setStartFollowController(true);
+			pet.setFollowStatus(true);
 		}
 
-		return destroyItem(process, item, count, reference, sendMessage);
+		EventBase.onTeleported(this);
 	}
-
-	/**
-	 * Destroy item from inventory by using its <B>itemId</B> and send InventoryUpdate packet to the Player.
-	 * @param process String Identifier of process triggering this action
-	 * @param itemId int Item identifier of the item to be destroyed
-	 * @param count int Quantity of items to be destroyed
-	 * @param reference WorldObject Object referencing current action like NPC selling item or previous item in transformation
-	 * @param sendMessage boolean Specifies whether to send message to Client about this action
-	 * @return boolean informing if the action was successfull
-	 */
-	@Override
-	public boolean destroyItemByItemId(String process, int itemId, int count, WorldObject reference, boolean sendMessage) {
-		if (itemId == ClassMaster.GOLD_ITEM_ID)
-			return reduceAdena(process, count, reference, sendMessage);
-
-		ItemInstance item = _inventory.getItemByItemId(itemId);
-
-		if (item == null || item.getCount() < count || _inventory.destroyItemByItemId(process, itemId, count, this, reference) == null) {
-			if (sendMessage)
-				sendPacket(SystemMessageId.NOT_ENOUGH_ITEMS);
-
-			return false;
-		}
-		
-		inventoryUpdate(item); // Send inventory update packet
-		statusLoadUpdate(); // Update current load as well
-		_inventory.updateRuneBonus(item); // Update runes
-
-		if (sendMessage) { // Sends message to client if requested
-			if (count > 1)
-				sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S2_S1_DISAPPEARED).addItemName(itemId).addItemNumber(count));
-			else
-				sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_DISAPPEARED).addItemName(itemId));
-		}
-		
-		return true;
-	}
-
-	@Override
-	public final boolean isAlikeDead() {
-		return super.isAlikeDead() || isFakeDeath();
-	}
-
-	@Override
-	public void enableSkill(L2Skill skill) {
-		super.enableSkill(skill);
-		_reuseTimeStamps.remove(skill.getReuseHashCode());
-	}
-
+	
 	@Override
 	protected boolean checkDoCastConditions(L2Skill skill) {
 		if (!super.checkDoCastConditions(skill))
@@ -6975,7 +6844,7 @@ public final class Player extends Playable {
 		L2SkillType skillType = skill.getSkillType();
 
 		if (skillType == L2SkillType.SUMMON) { // Can't summon multiple servitors.
-			if (!((L2SkillSummon) skill).isCubic() && (getPet() != null || isMounted())) {
+			if (!((L2SkillSummon) skill).isCubic() && (hasSummon() || isMounted())) {
 				sendPacket(SystemMessageId.SUMMON_ONLY_ONE);
 				return false;
 			}
@@ -7029,95 +6898,231 @@ public final class Player extends Playable {
 		
 		return true;
 	}
-
-	@Override
-	public void onAction(Player player) {
-		int playerObjectId = getObjectId();
-
-		if (!EventBase.getEventInstance().onAction(player, playerObjectId))
-			return;
-
-		if (player.getTarget() != this) { // Set the target of the player
-			player.setTarget(this);
-		} else {
-			if (isInStoreMode()) { // Check if this Player has a Private Store
-				player.getAI().setIntention(CtrlIntention.INTERACT, this);
-				return;
-			}
-			
-			if (isAutoAttackable(player)) { // Check if this Player is autoAttackable
-				if ((isCursedWeaponEquipped() && player.levelLessThan(21)) || (player.isCursedWeaponEquipped() && levelLessThan(21))) { // Player with lvl < 21 can't attack a cursed weapon holder and a cursed weapon holder can't attack players with lvl < 21
-					player.sendPacket(ActionFailed.STATIC_PACKET);
-					return;
-				}
-				
-				if (GeoEngine.getInstance().canSeeTarget(player, this)) {
-					player.getAI().setIntention(CtrlIntention.ATTACK, this);
-					player.onActionRequest();
-				}
-			} else {
-				player.sendPacket(ActionFailed.STATIC_PACKET); // avoids to stuck when clicking two or more times
-				
-				if (player != this && GeoEngine.getInstance().canSeeTarget(player, this))
-					player.getAI().setIntention(CtrlIntention.FOLLOW, this);
-			}
-		}
-	}
-
-	@Override
-	public void onActionShift(Player player) {
-		if (player.isGM())
-			AdminEditChar.showCharacterInfo(player, this);
-
-		super.onActionShift(player);
-	}
-
+	
 	/**
-	 * Send packet StatusUpdate with current HP,MP and CP to the Player and only current HP, MP and Level to all other Player of the Party.
-	 * Send StatusUpdate with current HP, MP and CP to this Player
-	 * Send PartySmallWindowUpdate with current HP, MP and Level to all other Player of the Party
-	 * This method DOESN'T SEND current HP and MP to all Player of the _statusListener
+	 * Check if the active L2Skill can be casted.
+	 * Check if the skill isn't toggle and is offensive
+	 * Check if the target is in the skill cast range
+	 * Check if the skill is Spoil type and if the target isn't already spoiled
+	 * Check if the caster owns enought consummed Item, enough HP and MP to cast the skill
+	 * Check if the caster isn't sitting
+	 * Check if all skills are enabled and this skill is enabled
+	 * Check if the caster own the weapon needed
+	 * Check if the skill is active
+	 * Check if all casting conditions are completed
+	 * Notify the AI with CAST and target
+	 * @param skill The L2Skill to use
+	 * @param forceUse used to force ATTACK on players
+	 * @param dontMove used to prevent movement, if not in range
 	 */
 	@Override
-	public void broadcastStatusUpdate() {
-		StatusUpdate su = new StatusUpdate(this); // Send StatusUpdate with current HP, MP and CP to this Player
-		su.addAttribute(StatusUpdate.CUR_HP, (int) getCurrentHp());
-		su.addAttribute(StatusUpdate.CUR_MP, (int) getCurrentMp());
-		su.addAttribute(StatusUpdate.CUR_CP, (int) getCurrentCp());
-		su.addAttribute(StatusUpdate.MAX_CP, getMaxCp());
-		sendPacket(su);
-		final boolean needCpUpdate = needCpUpdate(352);
-		final boolean needHpUpdate = needHpUpdate(352);
+	public boolean useMagic(L2Skill skill, boolean forceUse, boolean dontMove) {
+		if (skill.isPassive()) { // Check if the skill is active
+			sendPacket(ActionFailed.STATIC_PACKET);
+			return false;
+		}
+
+		if (isSkillDisabled(skill)) // Check if this skill is enabled (ex : reuse time)
+			return false;
 		
-		if (isInParty() && (needCpUpdate || needHpUpdate || needMpUpdate(352))) // Check if a party is in progress and party window update is needed.
-			_party.broadcastToPartyMembers(this, new PartySmallWindowUpdate(this));
-
-		if (isInOlympiadMode() && isOlympiadStart() && (needCpUpdate || needHpUpdate)) {
-			final OlympiadGameTask game = OlympiadGameManager.getInstance().getOlympiadTask(getOlympiadGameId());
-
-			if (game != null && game.isBattleStarted())
-				game.getZone().broadcastStatusUpdate(this);
+		// Cancels the use of skills when player uses a cursed weapon or is flying.
+		if ((isCursedWeaponEquipped() && !skill.isDemonicSkill()) || // If CW, allow ONLY demonic skills.
+		(getMountType() == 1 && !skill.isStriderSkill()) || // If mounted, allow ONLY Strider skills.
+		(getMountType() == 2 && !skill.isFlyingSkill())) { // If flying, allow ONLY Wyvern skills.
+			sendPacket(ActionFailed.STATIC_PACKET);
+			return false;
 		}
 		
-		if (isInDuel() && (needCpUpdate || needHpUpdate)) { // In duel, MP updated only with CP or HP
-			ExDuelUpdateUserInfo update = new ExDuelUpdateUserInfo(this);
-			DuelManager.getInstance().broadcastToOppositeTeam(this, update);
+		final ItemInstance formal = getInventory().getPaperdollItem(Inventory.PAPERDOLL_CHEST); // Players wearing Formal Wear cannot use skills.
+		
+		if (formal != null && formal.getItem().getBodyPart() == Item.SLOT_ALLDRESS) {
+			sendPacket(SystemMessageId.CANNOT_USE_ITEMS_SKILLS_WITH_FORMALWEAR);
+			sendPacket(ActionFailed.STATIC_PACKET);
+			return false;
 		}
-	}
+		
+		// *** Check Casting in Progress *** //
+		if (isCastingNow()) { // If a skill is currently being used, queue this one if this is not the same
+			if (_currentSkill.getSkill() != null && skill.getId() != _currentSkill.getSkillId()) // Check if new skill different from current skill in progress ; queue it in the player _queuedSkill
+				setQueuedSkill(skill, forceUse, dontMove);
+			
+			sendPacket(ActionFailed.STATIC_PACKET);
+			return false;
+		}
+		
+		setIsCastingNow(true);
+		setCurrentSkill(skill, forceUse, dontMove); // Set the player _currentSkill.
 
-	/** Send a packet to the Player. */
+		if (_queuedSkill.getSkill() != null) // Wipe queued skill.
+			setQueuedSkill(null, false, false);
+		
+		if (!checkUseMagicConditions(skill, forceUse, dontMove)) {
+			setIsCastingNow(false);
+			return false;
+		}
+
+		WorldObject target = null; // Check if the target is correct and Notify the AI with CAST and target
+
+		switch (skill.getTargetType()) {
+			case TARGET_AURA:
+			case TARGET_FRONT_AURA:
+			case TARGET_BEHIND_AURA:
+			case TARGET_GROUND:
+			case TARGET_SELF:
+			case TARGET_CORPSE_ALLY:
+			case TARGET_AURA_UNDEAD:
+				target = this;
+				break;
+			
+			default: // Get the first target of the list
+				target = skill.getFirstOfTargetList(this);
+		}
+		
+		// Notify the AI with CAST and target
+		getAI().setIntention(CtrlIntention.CAST, skill, target);
+		return true;
+	}
+	
+	/**
+	 * Return True if the Player is autoAttackable.
+	 * Check if the attacker isn't the Player Pet
+	 * Check if the attacker is L2MonsterInstance
+	 * If the attacker is a Player, check if it is not in the same party
+	 * Check if the Player has Karma
+	 * If the attacker is a Player, check if it is not in the same siege clan (Attacker, Defender)
+	 */
 	@Override
-	public void sendPacket(L2GameServerPacket packet) {
-		if (_client != null)
-			_client.sendPacket(packet);
-	}
+	public boolean isAutoAttackable(Creature attacker) {
+		if (attacker == this || attacker == getPet())
+			return false;
 
-	/** Send SystemMessage packet. @param id SystemMessageId */
+		if (attacker instanceof Attackable)
+			return true;
+
+		if (isInParty() && _party.containsPlayer(attacker))
+			return false;
+
+		final Siege siege = CastleManager.getInstance().getActiveSiege(this);
+		
+		if (attacker instanceof Playable) {
+			if (isInsideZone(ZoneId.PEACE))
+				return false;
+
+			final Player attackerPlayer = attacker.getActingPlayer();
+
+			if (!isSameFaction(attackerPlayer))
+				return true;
+
+			if (getDuelState() == DuelState.DUELLING && getDuelId() == attackerPlayer.getDuelId()) // is AutoAttackable if both players are in the same duel and the duel is still going on
+				return true;
+
+			if (attackerPlayer.isInOlympiadMode()) // Check if the attacker is in olympiad and olympiad start
+				return isInOlympiadMode() && isOlympiadStart() && attackerPlayer.getOlympiadGameId() == getOlympiadGameId();
+
+			if (!EventBase.isPlayerParticipant(getObjectId()) && (isInArena() && attacker.isInArena()))
+				return true;
+
+			if (EventBase.isStartedAndParticipant(getObjectId()) && !TMEvent.isInSameTeam(getObjectId(), attackerPlayer.getObjectId()))
+				return true;
+
+			if (hasClan()) {
+				Clan clan = getClan();
+
+				if (siege != null) {
+					if (siege.checkSides(attackerPlayer.getClan(), SiegeSide.DEFENDER, SiegeSide.OWNER) && siege.checkSides(clan, SiegeSide.DEFENDER, SiegeSide.OWNER)) // Check if a siege is in progress and if attacker and the Player aren't in the Defender clan.
+						return false;
+
+					if (siege.checkSide(attackerPlayer.getClan(), SiegeSide.ATTACKER) && siege.checkSide(clan, SiegeSide.ATTACKER)) // Check if a siege is in progress and if attacker and the Player aren't in the Attacker clan.
+						return false;
+				}
+
+				if (clan.isAtWarWith(attackerPlayer.getClanId()) && !wantsPeace() && !attackerPlayer.wantsPeace() && !isAcademyMember()) // Check if clan is at war.
+					return true;
+
+				if (clan.isMember(attackerPlayer.getObjectId())) // Check if the attacker is not in the same clan.
+					return false;
+
+				if (getAllyId() != 0 && getAllyId() == attackerPlayer.getAllyId()) // Check if the attacker is not in the same ally.
+					return false;
+			}
+		}
+
+		if (attacker instanceof SiegeGuard)
+			return hasClan() && siege != null && siege.checkSide(getClan(), SiegeSide.ATTACKER);
+
+		return hasKarma() || isFlagged();
+	}
+	
 	@Override
-	public void sendPacket(SystemMessageId id) {
-		sendPacket(SystemMessage.getSystemMessage(id));
-	}
+	public void setTarget(WorldObject newTarget) {
+		boolean newTargetIsPlayer = newTarget.isInstanceOfPlayer();
 
+		if (newTargetIsPlayer) { /// TODO : TEST Get the stack trace
+			StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
+			StackTraceElement callingMethod = stackTrace[2]; // The calling method will be at index 2 in the stack trace
+			System.out.println("Called from class: " + callingMethod.getClassName());
+			System.out.println("Called from method: " + callingMethod.getMethodName());
+		} /// TODO : TEST Get the stack trace
+
+		/*if (getName().equals("Mage") && getTarget() == null || getName().equals("Fighter") && getTarget() == null) {
+			Thread.dumpStack();
+			System.out.println("Player");
+		}*/
+
+		//STOP SKILL IF TARGET IS PLAYER. IN THIS EXAMPLE STOP IF NOT MONSTER
+		/*if (!(newTarget instanceof Monster) && newTarget != null && newTarget != this && getFirstEffect(7029) != null) { //newTarget.isInstanceOfPlayer()
+			stopSkillEffects(7029);
+			//if (&& hasSkill(7029))
+		}*/
+
+		if (newTargetIsPlayer && getTarget() == null && !hasKarma() && !isFlagged() && !isSameFaction(((Player) newTarget)) && !((Player) newTarget).isInsideZone(ZoneId.PEACE)) // disable auto target
+			newTarget = this;
+
+		if (newTarget != null && !newTarget.isVisible() && !(newTargetIsPlayer && isInParty() && _party.containsPlayer(newTarget))) // Check if the new target is visible.
+			newTarget = null;
+
+		WorldObject oldTarget = getTarget(); // Get the current target
+
+		if (oldTarget != null) {
+			if (oldTarget.equals(newTarget)) // no target change
+				return;
+
+			if (oldTarget instanceof Creature) // Remove the Player from the _statusListener of the old target if it was a Creature
+				((Creature) oldTarget).removeStatusListener(this);
+		}
+		
+		if (newTarget instanceof StaticObject) { // Verify if it's a static object.
+			sendPacket(new MyTargetSelected(newTarget.getObjectId(), 0));
+			sendPacket(new StaticObjectInfo((StaticObject) newTarget));
+		} else if (newTarget instanceof Creature) { // Add the Player to the _statusListener of the new target if it's a Creature
+			final Creature target = (Creature) newTarget;
+
+			if (newTarget.getObjectId() != getObjectId()) // Validate location of the new target.
+				sendPacket(new ValidateLocation(target));
+
+			sendPacket(new MyTargetSelected(target.getObjectId(), (target.isAutoAttackable(this) || target instanceof Summon) ? getLevel() - target.getLevel() : 0)); // Show the client his new target.
+			target.addStatusListener(this);
+			final StatusUpdate su = new StatusUpdate(target); // Send max/current hp.
+			su.addAttribute(StatusUpdate.MAX_HP, target.getMaxHp());
+			su.addAttribute(StatusUpdate.CUR_HP, (int) target.getCurrentHp());
+			sendPacket(su);
+			Broadcast.toKnownPlayers(this, new TargetSelected(getObjectId(), newTarget.getObjectId(), getX(), getY(), getZ()));
+		}
+		
+		if (newTarget instanceof Folk) {
+			setCurrentFolk((Folk) newTarget);
+		} else if (newTarget == null) {
+			sendPacket(ActionFailed.STATIC_PACKET);
+			
+			if (getTarget() != null) {
+				broadcastPacket(new TargetUnselected(this));
+				setCurrentFolk(null);
+			}
+		}
+		
+		super.setTarget(newTarget); // Target the new WorldObject
+	}
+	
 	/**
 	 * Manage Pickup Task.
 	 * Send StopMove to this Player
@@ -7217,6 +7222,364 @@ public final class Player extends Playable {
 		ThreadPool.schedule(() -> setIsParalyzed(false), (int) (700 / getStat().getMovementSpeedMultiplier())); // Schedule a paralyzed task to wait for the animation to finish
 		setIsParalyzed(true);
 	}
+	
+	@Override
+	public void onAction(Player player) {
+		int playerObjectId = getObjectId();
+
+		if (!EventBase.getEventInstance().onAction(player, playerObjectId))
+			return;
+
+		if (player.getTarget() != this) { // Set the target of the player
+			player.setTarget(this);
+		} else {
+			if (isInStoreMode()) { // Check if this Player has a Private Store
+				player.getAI().setIntention(CtrlIntention.INTERACT, this);
+				return;
+			}
+			
+			if (isAutoAttackable(player)) { // Check if this Player is autoAttackable
+				if ((isCursedWeaponEquipped() && player.levelLessThan(21)) || (player.isCursedWeaponEquipped() && levelLessThan(21))) { // Player with lvl < 21 can't attack a cursed weapon holder and a cursed weapon holder can't attack players with lvl < 21
+					player.sendPacket(ActionFailed.STATIC_PACKET);
+					return;
+				}
+				
+				if (GeoEngine.getInstance().canSeeTarget(player, this)) {
+					player.getAI().setIntention(CtrlIntention.ATTACK, this);
+					player.onActionRequest();
+				}
+			} else {
+				player.sendPacket(ActionFailed.STATIC_PACKET); // avoids to stuck when clicking two or more times
+				
+				if (player != this && GeoEngine.getInstance().canSeeTarget(player, this))
+					player.getAI().setIntention(CtrlIntention.FOLLOW, this);
+			}
+		}
+	}
+	
+	@Override
+	public void revalidateZone(boolean force) {
+		super.revalidateZone(force);
+
+		if (Config.ALLOW_WATER) {
+			if (isInsideZone(ZoneId.WATER))
+				WaterTaskManager.getInstance().add(this);
+			else
+				WaterTaskManager.getInstance().remove(this);
+		}
+		
+		if (isInsideZone(ZoneId.SIEGE)) {
+			if (_lastCompassZone == ExSetCompassZoneCode.SIEGEWARZONE2)
+				return;
+
+			_lastCompassZone = ExSetCompassZoneCode.SIEGEWARZONE2;
+			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.SIEGEWARZONE2));
+		} else if (isInsideZone(ZoneId.PVP)) {
+			if (_lastCompassZone == ExSetCompassZoneCode.PVPZONE)
+				return;
+
+			_lastCompassZone = ExSetCompassZoneCode.PVPZONE;
+			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.PVPZONE));
+		} else if (isInsideZone(ZoneId.PEACE)) {
+			if (_lastCompassZone == ExSetCompassZoneCode.PEACEZONE)
+				return;
+
+			_lastCompassZone = ExSetCompassZoneCode.PEACEZONE;
+			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.PEACEZONE));
+		} else {
+			if (_lastCompassZone == ExSetCompassZoneCode.GENERALZONE)
+				return;
+
+			if (_lastCompassZone == ExSetCompassZoneCode.SIEGEWARZONE2)
+				updatePvPStatus();
+
+			_lastCompassZone = ExSetCompassZoneCode.GENERALZONE;
+			sendPacket(new ExSetCompassZoneCode(ExSetCompassZoneCode.GENERALZONE));
+		}
+	}
+	
+		/**
+	 * Destroys item from inventory and send InventoryUpdate packet to the Player.
+	 * @param process String Identifier of process triggering this action
+	 * @param objectId int Item Instance identifier of the item to be destroyed
+	 * @param count int Quantity of items to be destroyed
+	 * @param reference WorldObject Object referencing current action like NPC selling item or previous item in transformation
+	 * @param sendMessage boolean Specifies whether to send message to Client about this action
+	 * @return boolean informing if the action was successfull
+	 */
+	@Override
+	public boolean destroyItem(String process, int objectId, int count, WorldObject reference, boolean sendMessage) {
+		final ItemInstance item = _inventory.getItemByObjectId(objectId);
+		
+		if (item == null) {
+			if (sendMessage)
+				sendPacket(SystemMessageId.NOT_ENOUGH_ITEMS);
+
+			return false;
+		}
+
+		return destroyItem(process, item, count, reference, sendMessage);
+	}
+
+	/**
+	 * Destroy item from inventory by using its <B>itemId</B> and send InventoryUpdate packet to the Player.
+	 * @param process String Identifier of process triggering this action
+	 * @param itemId int Item identifier of the item to be destroyed
+	 * @param count int Quantity of items to be destroyed
+	 * @param reference WorldObject Object referencing current action like NPC selling item or previous item in transformation
+	 * @param sendMessage boolean Specifies whether to send message to Client about this action
+	 * @return boolean informing if the action was successfull
+	 */
+	@Override
+	public boolean destroyItemByItemId(String process, int itemId, int count, WorldObject reference, boolean sendMessage) {
+		if (itemId == ClassMaster.GOLD_ITEM_ID)
+			return reduceAdena(process, count, reference, sendMessage);
+
+		ItemInstance item = _inventory.getItemByItemId(itemId);
+
+		if (item == null || item.getCount() < count || _inventory.destroyItemByItemId(process, itemId, count, this, reference) == null) {
+			if (sendMessage)
+				sendPacket(SystemMessageId.NOT_ENOUGH_ITEMS);
+
+			return false;
+		}
+		
+		inventoryUpdate(item); // Send inventory update packet
+		statusLoadUpdate(); // Update current load as well
+		_inventory.updateRuneBonus(item); // Update runes
+
+		if (sendMessage) { // Sends message to client if requested
+			if (count > 1)
+				sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S2_S1_DISAPPEARED).addItemName(itemId).addItemNumber(count));
+			else
+				sendPacket(SystemMessage.getSystemMessage(SystemMessageId.S1_DISAPPEARED).addItemName(itemId));
+		}
+		
+		return true;
+	}
+	
+	@Override
+	public void doRevive() {
+		super.doRevive();
+		stopEffects(L2EffectType.CHARMOFCOURAGE);
+		sendPacket(new EtcStatusUpdate(this));
+		broadcastUserInfo();
+		_reviveRequested = 0;
+		_revivePower = 0;
+
+		if (isMounted())
+			startFeed(_mountNpcId);
+
+		if (getPunishLevel() == PunishLevel.DEAD && getPunishTimer() > 0) {
+			penaltyDeadPlayer(PunishLevel.NONE, 0);
+			stopPunishTask(true);
+		}
+
+		ThreadPool.schedule(() -> setIsParalyzed(false), (int) (2000 / getStat().getMovementSpeedMultiplier())); // Schedule a paralyzed task to wait for the animation to finish
+		setIsParalyzed(true);
+	}
+
+	/**
+	 * Send packet StatusUpdate with current HP,MP and CP to the Player and only current HP, MP and Level to all other Player of the Party.
+	 * Send StatusUpdate with current HP, MP and CP to this Player
+	 * Send PartySmallWindowUpdate with current HP, MP and Level to all other Player of the Party
+	 * This method DOESN'T SEND current HP and MP to all Player of the _statusListener
+	 */
+	@Override
+	public void broadcastStatusUpdate() {
+		StatusUpdate su = new StatusUpdate(this); // Send StatusUpdate with current HP, MP and CP to this Player
+		su.addAttribute(StatusUpdate.CUR_HP, (int) getCurrentHp());
+		su.addAttribute(StatusUpdate.CUR_MP, (int) getCurrentMp());
+		su.addAttribute(StatusUpdate.CUR_CP, (int) getCurrentCp());
+		su.addAttribute(StatusUpdate.MAX_CP, getMaxCp());
+		sendPacket(su);
+		final boolean needCpUpdate = needCpUpdate(352);
+		final boolean needHpUpdate = needHpUpdate(352);
+		
+		if (isInParty() && (needCpUpdate || needHpUpdate || needMpUpdate(352))) // Check if a party is in progress and party window update is needed.
+			_party.broadcastToPartyMembers(this, new PartySmallWindowUpdate(this));
+
+		if (isInOlympiadMode() && isOlympiadStart() && (needCpUpdate || needHpUpdate)) {
+			final OlympiadGameTask game = OlympiadGameManager.getInstance().getOlympiadTask(getOlympiadGameId());
+
+			if (game != null && game.isBattleStarted())
+				game.getZone().broadcastStatusUpdate(this);
+		}
+		
+		if (isInDuel() && (needCpUpdate || needHpUpdate)) { // In duel, MP updated only with CP or HP
+			ExDuelUpdateUserInfo update = new ExDuelUpdateUserInfo(this);
+			DuelManager.getInstance().broadcastToOppositeTeam(this, update);
+		}
+	}
+	
+	@Override
+	public final void sendDamageMessage(Creature target, int damage, boolean mcrit, boolean pcrit, boolean miss) {
+		if (miss) {
+			sendPacket(SystemMessageId.MISSED_TARGET);
+			return;
+		}
+
+		if (pcrit)
+			sendPacket(SystemMessageId.CRITICAL_HIT);
+		else if (mcrit)
+			sendPacket(SystemMessageId.CRITICAL_HIT_MAGIC);
+
+		if (target.isInvul())
+			sendPacket(target.isParalyzed() ? SystemMessageId.OPPONENT_PETRIFIED : SystemMessageId.ATTACK_WAS_BLOCKED);
+		else
+			sendPacket(SystemMessage.getSystemMessage(SystemMessageId.YOU_S2_DID_S1_DMG).addNumber(damage).addCharName(target));
+
+		if (isInOlympiadMode() && target.isInstanceOfPlayer() && ((Player) target).isInOlympiadMode() && ((Player) target).getOlympiadGameId() == getOlympiadGameId())
+			OlympiadGameManager.getInstance().notifyCompetitorDamage(this, damage);
+	}
+	
+	@Override
+	public void reduceCurrentHp(double value, Creature attacker, boolean awake, boolean isDOT, L2Skill skill) {
+		if (skill != null)
+			getStatus().reduceHp(value, attacker, awake, isDOT, skill.isToggle(), skill.getDmgDirectlyToHP());
+		else
+			getStatus().reduceHp(value, attacker, awake, isDOT, false, false);
+
+		if (getTrainedBeast() != null) // notify the tamed beast of attacks
+			getTrainedBeast().onOwnerGotAttacked(attacker);
+	}
+	
+	@Override
+	public void rechargeShots(boolean physical, boolean magic) {
+		if (_activeSoulShots.isEmpty())
+			return;
+
+		for (int itemId : _activeSoulShots) {
+			ItemInstance item = getInventory().getItemByItemId(itemId);
+			
+			if (item != null) {
+				rechargeShots(item, magic, ActionType.spiritshot);
+				rechargeShots(item, physical, ActionType.soulshot);
+			} else {
+				removeAutoSoulShot(itemId);
+			}
+		}
+	}
+	
+	@Override
+	public void addFuncsToNewCharacter() {
+		super.addFuncsToNewCharacter(); // Add Creature functionalities.
+		addStatFunc(FuncHennaSTR.getInstance());
+		addStatFunc(FuncHennaINT.getInstance());
+		addStatFunc(FuncHennaDEX.getInstance());
+		addStatFunc(FuncHennaWIT.getInstance());
+		addStatFunc(FuncHennaCON.getInstance());
+		addStatFunc(FuncHennaMEN.getInstance());
+	}
+
+	@Override
+	protected void initCharStatusUpdateValues() {
+		super.initCharStatusUpdateValues();
+		_cpUpdateInterval = getMaxCp() / 352.0;
+		_cpUpdateIncCheck = getMaxCp();
+		_cpUpdateDecCheck = getMaxCp() - _cpUpdateInterval;
+		_mpUpdateInterval = getMaxMp() / 352.0;
+		_mpUpdateIncCheck = getMaxMp();
+		_mpUpdateDecCheck = getMaxMp() - _mpUpdateInterval;
+	}
+
+	@Override
+	public CreatureAI getAI() {
+		CreatureAI ai = _ai;
+
+		if (ai == null) {
+			synchronized (this) {
+				if (_ai == null)
+					_ai = new PlayerAI(this);
+
+				return _ai;
+			}
+		}
+
+		return ai;
+	}
+
+	@Override
+	public void initCharStat() {
+		setStat(new PlayerStat(this));
+	}
+
+	@Override
+	public final PlayerStat getStat() {
+		return (PlayerStat) super.getStat();
+	}
+
+	@Override
+	public void initCharStatus() {
+		setStatus(new PlayerStatus(this));
+	}
+
+	@Override
+	public final PlayerStatus getStatus() {
+		return (PlayerStatus) super.getStatus();
+	}
+
+	@Override
+	public final PlayerTemplate getTemplate() {
+		return (PlayerTemplate) super.getTemplate();
+	}
+
+	@Override
+	public final int getLevel() {
+		return getStat().getLevel();
+	}
+
+	@Override
+	public byte getPvpFlag() {
+		return _pvpFlag;
+	}
+
+	@Override
+	public boolean hasKarma() {
+		return _karma > 0;
+	}
+	
+	@Override
+	public int getKarma() {
+		return _karma;
+	}
+
+	@Override
+	public PcInventory getInventory() {
+		return _inventory;
+	}
+
+	@Override
+	public final boolean isAlikeDead() {
+		return super.isAlikeDead() || isFakeDeath();
+	}
+
+	@Override
+	public void enableSkill(L2Skill skill) {
+		super.enableSkill(skill);
+		_reuseTimeStamps.remove(skill.getReuseHashCode());
+	}
+
+	@Override
+	public void onActionShift(Player player) {
+		if (player.isGM())
+			AdminEditChar.showCharacterInfo(player, this);
+
+		super.onActionShift(player);
+	}
+
+	/** Send a packet to the Player. */
+	@Override
+	public void sendPacket(L2GameServerPacket packet) {
+		if (_client != null)
+			_client.sendPacket(packet);
+	}
+
+	/** Send SystemMessage packet. @param id SystemMessageId */
+	@Override
+	public void sendPacket(SystemMessageId id) {
+		sendPacket(SystemMessage.getSystemMessage(id));
+	}
 
 	@Override
 	public void doAttack(Creature target) {
@@ -7228,76 +7591,6 @@ public final class Player extends Playable {
 	public void doCast(L2Skill skill) {
 		super.doCast(skill);
 		clearRecentFakeDeath();
-	}
-
-	@Override
-	public void setTarget(WorldObject newTarget) {
-		boolean newTargetIsPlayer = newTarget.isInstanceOfPlayer();
-
-		if (newTargetIsPlayer) { /// TODO : TEST Get the stack trace
-			StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
-			StackTraceElement callingMethod = stackTrace[2]; // The calling method will be at index 2 in the stack trace
-			System.out.println("Called from class: " + callingMethod.getClassName());
-			System.out.println("Called from method: " + callingMethod.getMethodName());
-		} /// TODO : TEST Get the stack trace
-
-		/*if (getName().equals("Mage") && getTarget() == null || getName().equals("Fighter") && getTarget() == null) {
-			Thread.dumpStack();
-			System.out.println("Player");
-		}*/
-
-		//STOP SKILL IF TARGET IS PLAYER. IN THIS EXAMPLE STOP IF NOT MONSTER
-		/*if (!(newTarget instanceof Monster) && newTarget != null && newTarget != this && getFirstEffect(7029) != null) { //newTarget.isInstanceOfPlayer()
-			stopSkillEffects(7029);
-			//if (&& hasSkill(7029))
-		}*/
-
-		if (newTargetIsPlayer && getTarget() == null && !hasKarma() && !isFlagged() && !isSameFaction(((Player) newTarget)) && !((Player) newTarget).isInsideZone(ZoneId.PEACE)) // disable auto target
-			newTarget = this;
-
-		if (newTarget != null && !newTarget.isVisible() && !(newTargetIsPlayer && isInParty() && _party.containsPlayer(newTarget))) // Check if the new target is visible.
-			newTarget = null;
-
-		WorldObject oldTarget = getTarget(); // Get the current target
-
-		if (oldTarget != null) {
-			if (oldTarget.equals(newTarget)) // no target change
-				return;
-
-			if (oldTarget instanceof Creature) // Remove the Player from the _statusListener of the old target if it was a Creature
-				((Creature) oldTarget).removeStatusListener(this);
-		}
-		
-		if (newTarget instanceof StaticObject) { // Verify if it's a static object.
-			sendPacket(new MyTargetSelected(newTarget.getObjectId(), 0));
-			sendPacket(new StaticObjectInfo((StaticObject) newTarget));
-		} else if (newTarget instanceof Creature) { // Add the Player to the _statusListener of the new target if it's a Creature
-			final Creature target = (Creature) newTarget;
-
-			if (newTarget.getObjectId() != getObjectId()) // Validate location of the new target.
-				sendPacket(new ValidateLocation(target));
-
-			sendPacket(new MyTargetSelected(target.getObjectId(), (target.isAutoAttackable(this) || target instanceof Summon) ? getLevel() - target.getLevel() : 0)); // Show the client his new target.
-			target.addStatusListener(this);
-			final StatusUpdate su = new StatusUpdate(target); // Send max/current hp.
-			su.addAttribute(StatusUpdate.MAX_HP, target.getMaxHp());
-			su.addAttribute(StatusUpdate.CUR_HP, (int) target.getCurrentHp());
-			sendPacket(su);
-			Broadcast.toKnownPlayers(this, new TargetSelected(getObjectId(), newTarget.getObjectId(), getX(), getY(), getZ()));
-		}
-		
-		if (newTarget instanceof Folk) {
-			setCurrentFolk((Folk) newTarget);
-		} else if (newTarget == null) {
-			sendPacket(ActionFailed.STATIC_PACKET);
-			
-			if (getTarget() != null) {
-				broadcastPacket(new TargetUnselected(this));
-				setCurrentFolk(null);
-			}
-		}
-		
-		super.setTarget(newTarget); // Target the new WorldObject
 	}
 
 	/** Return the active weapon instance (always equipped in the right hand). */
@@ -7356,160 +7649,6 @@ public final class Player extends Playable {
 		return getAccessLevel().isGm();
 	}
 
-	/**
-	 * Return True if the Player is autoAttackable.
-	 * Check if the attacker isn't the Player Pet
-	 * Check if the attacker is L2MonsterInstance
-	 * If the attacker is a Player, check if it is not in the same party
-	 * Check if the Player has Karma
-	 * If the attacker is a Player, check if it is not in the same siege clan (Attacker, Defender)
-	 */
-	@Override
-	public boolean isAutoAttackable(Creature attacker) {
-		if (attacker == this || attacker == getPet())
-			return false;
-
-		if (attacker instanceof Attackable)
-			return true;
-
-		if (isInParty() && _party.containsPlayer(attacker))
-			return false;
-
-		final Siege siege = CastleManager.getInstance().getActiveSiege(this);
-		
-		if (attacker instanceof Playable) {
-			if (isInsideZone(ZoneId.PEACE))
-				return false;
-
-			final Player attackerPlayer = attacker.getActingPlayer();
-
-			if (!isSameFaction(attackerPlayer))
-				return true;
-
-			if (getDuelState() == DuelState.DUELLING && getDuelId() == attackerPlayer.getDuelId()) // is AutoAttackable if both players are in the same duel and the duel is still going on
-				return true;
-
-			if (attackerPlayer.isInOlympiadMode()) // Check if the attacker is in olympiad and olympiad start
-				return isInOlympiadMode() && isOlympiadStart() && attackerPlayer.getOlympiadGameId() == getOlympiadGameId();
-
-			if (!EventBase.isPlayerParticipant(getObjectId()) && (isInArena() && attacker.isInArena()))
-				return true;
-
-			if (EventBase.isStartedAndParticipant(getObjectId()) && !TMEvent.isInSameTeam(getObjectId(), attackerPlayer.getObjectId()))
-				return true;
-
-			if (hasClan()) {
-				Clan clan = getClan();
-
-				if (siege != null) {
-					if (siege.checkSides(attackerPlayer.getClan(), SiegeSide.DEFENDER, SiegeSide.OWNER) && siege.checkSides(clan, SiegeSide.DEFENDER, SiegeSide.OWNER)) // Check if a siege is in progress and if attacker and the Player aren't in the Defender clan.
-						return false;
-
-					if (siege.checkSide(attackerPlayer.getClan(), SiegeSide.ATTACKER) && siege.checkSide(clan, SiegeSide.ATTACKER)) // Check if a siege is in progress and if attacker and the Player aren't in the Attacker clan.
-						return false;
-				}
-
-				if (clan.isAtWarWith(attackerPlayer.getClanId()) && !wantsPeace() && !attackerPlayer.wantsPeace() && !isAcademyMember()) // Check if clan is at war.
-					return true;
-
-				if (clan.isMember(attackerPlayer.getObjectId())) // Check if the attacker is not in the same clan.
-					return false;
-
-				if (getAllyId() != 0 && getAllyId() == attackerPlayer.getAllyId()) // Check if the attacker is not in the same ally.
-					return false;
-			}
-		}
-
-		if (attacker instanceof SiegeGuard)
-			return hasClan() && siege != null && siege.checkSide(getClan(), SiegeSide.ATTACKER);
-
-		return hasKarma() || isFlagged();
-	}
-
-	/**
-	 * Check if the active L2Skill can be casted.
-	 * Check if the skill isn't toggle and is offensive
-	 * Check if the target is in the skill cast range
-	 * Check if the skill is Spoil type and if the target isn't already spoiled
-	 * Check if the caster owns enought consummed Item, enough HP and MP to cast the skill
-	 * Check if the caster isn't sitting
-	 * Check if all skills are enabled and this skill is enabled
-	 * Check if the caster own the weapon needed
-	 * Check if the skill is active
-	 * Check if all casting conditions are completed
-	 * Notify the AI with CAST and target
-	 * @param skill The L2Skill to use
-	 * @param forceUse used to force ATTACK on players
-	 * @param dontMove used to prevent movement, if not in range
-	 */
-	@Override
-	public boolean useMagic(L2Skill skill, boolean forceUse, boolean dontMove) {
-		if (skill.isPassive()) { // Check if the skill is active
-			sendPacket(ActionFailed.STATIC_PACKET);
-			return false;
-		}
-
-		if (isSkillDisabled(skill)) // Check if this skill is enabled (ex : reuse time)
-			return false;
-		
-		// Cancels the use of skills when player uses a cursed weapon or is flying.
-		if ((isCursedWeaponEquipped() && !skill.isDemonicSkill()) || // If CW, allow ONLY demonic skills.
-			(getMountType() == 1 && !skill.isStriderSkill()) || // If mounted, allow ONLY Strider skills.
-			(getMountType() == 2 && !skill.isFlyingSkill())) { // If flying, allow ONLY Wyvern skills.
-			sendPacket(ActionFailed.STATIC_PACKET);
-			return false;
-		}
-		
-		final ItemInstance formal = getInventory().getPaperdollItem(Inventory.PAPERDOLL_CHEST); // Players wearing Formal Wear cannot use skills.
-		
-		if (formal != null && formal.getItem().getBodyPart() == Item.SLOT_ALLDRESS) {
-			sendPacket(SystemMessageId.CANNOT_USE_ITEMS_SKILLS_WITH_FORMALWEAR);
-			sendPacket(ActionFailed.STATIC_PACKET);
-			return false;
-		}
-		
-		// *** Check Casting in Progress *** //
-		if (isCastingNow()) { // If a skill is currently being used, queue this one if this is not the same
-			if (_currentSkill.getSkill() != null && skill.getId() != _currentSkill.getSkillId()) // Check if new skill different from current skill in progress ; queue it in the player _queuedSkill
-				setQueuedSkill(skill, forceUse, dontMove);
-			
-			sendPacket(ActionFailed.STATIC_PACKET);
-			return false;
-		}
-		
-		setIsCastingNow(true);
-		setCurrentSkill(skill, forceUse, dontMove); // Set the player _currentSkill.
-
-		if (_queuedSkill.getSkill() != null) // Wipe queued skill.
-			setQueuedSkill(null, false, false);
-		
-		if (!checkUseMagicConditions(skill, forceUse, dontMove)) {
-			setIsCastingNow(false);
-			return false;
-		}
-
-		WorldObject target = null; // Check if the target is correct and Notify the AI with CAST and target
-
-		switch (skill.getTargetType()) {
-			case TARGET_AURA:
-			case TARGET_FRONT_AURA:
-			case TARGET_BEHIND_AURA:
-			case TARGET_GROUND:
-			case TARGET_SELF:
-			case TARGET_CORPSE_ALLY:
-			case TARGET_AURA_UNDEAD:
-				target = this;
-				break;
-			
-			default: // Get the first target of the list
-				target = skill.getFirstOfTargetList(this);
-		}
-		
-		// Notify the AI with CAST and target
-		getAI().setIntention(CtrlIntention.CAST, skill, target);
-		return true;
-	}
-
 	@Override
 	public boolean isSeated() {
 		return _throneId > 0;
@@ -7565,46 +7704,8 @@ public final class Player extends Playable {
 	}
 
 	@Override
-	public void rechargeShots(boolean physical, boolean magic) {
-		if (_activeSoulShots.isEmpty())
-			return;
-
-		for (int itemId : _activeSoulShots) {
-			ItemInstance item = getInventory().getItemByItemId(itemId);
-			
-			if (item != null) {
-				rechargeShots(item, magic, ActionType.spiritshot);
-				rechargeShots(item, physical, ActionType.soulshot);
-			} else {
-				removeAutoSoulShot(itemId);
-			}
-		}
-	}
-
-	@Override
 	public void sendMessage(String message) {
 		sendPacket(SystemMessage.sendString(message));
-	}
-
-	@Override
-	public void doRevive() {
-		super.doRevive();
-		stopEffects(L2EffectType.CHARMOFCOURAGE);
-		sendPacket(new EtcStatusUpdate(this));
-		broadcastUserInfo();
-		_reviveRequested = 0;
-		_revivePower = 0;
-
-		if (isMounted())
-			startFeed(_mountNpcId);
-
-		if (getPunishLevel() == PunishLevel.DEAD && getPunishTimer() > 0) {
-			penaltyDeadPlayer(PunishLevel.NONE, 0);
-			stopPunishTask(true);
-		}
-
-		ThreadPool.schedule(() -> setIsParalyzed(false), (int) (2000 / getStat().getMovementSpeedMultiplier())); // Schedule a paralyzed task to wait for the animation to finish
-		setIsParalyzed(true);
 	}
 
 	@Override
@@ -7614,49 +7715,8 @@ public final class Player extends Playable {
 	}
 
 	@Override
-	public final void onTeleported() {
-		super.onTeleported();
-		
-		if (Config.PLAYER_SPAWN_PROTECTION > 0) {
-			setSpawnProtection(true);
-			startAbnormalEffect(PlayerUtils.ABNORMAL_EFFECT_TELEPORT);
-		}
-
-		if (!isGM())
-			stopAllToggles();
-
-		if (getTrainedBeast() != null) {
-			getTrainedBeast().getAI().stopFollow();
-			getTrainedBeast().teleToLocation(getPosition(), 0);
-			getTrainedBeast().getAI().startFollow(this);
-		}
-		
-		Summon pet = getPet();
-		
-		if (pet != null) {
-			pet.setFollowStatus(false);
-			pet.teleToLocation(getPosition(), 0);
-			((SummonAI) pet.getAI()).setStartFollowController(true);
-			pet.setFollowStatus(true);
-		}
-
-		EventBase.onTeleported(this);
-	}
-
-	@Override
 	public void addExpAndSp(long addToExp, int addToSp) {
 		addExpAndSp(addToExp, addToSp, null);
-	}
-
-	@Override
-	public void reduceCurrentHp(double value, Creature attacker, boolean awake, boolean isDOT, L2Skill skill) {
-		if (skill != null)
-			getStatus().reduceHp(value, attacker, awake, isDOT, skill.isToggle(), skill.getDmgDirectlyToHP());
-		else
-			getStatus().reduceHp(value, attacker, awake, isDOT, false, false);
-
-		if (getTrainedBeast() != null) // notify the tamed beast of attacks
-			getTrainedBeast().onOwnerGotAttacked(attacker);
 	}
 
 	/**
@@ -7699,86 +7759,9 @@ public final class Player extends Playable {
 	}
 
 	@Override
-	public final void sendDamageMessage(Creature target, int damage, boolean mcrit, boolean pcrit, boolean miss) {
-		if (miss) {
-			sendPacket(SystemMessageId.MISSED_TARGET);
-			return;
-		}
-
-		if (pcrit)
-			sendPacket(SystemMessageId.CRITICAL_HIT);
-		else if (mcrit)
-			sendPacket(SystemMessageId.CRITICAL_HIT_MAGIC);
-
-		if (target.isInvul())
-			sendPacket(target.isParalyzed() ? SystemMessageId.OPPONENT_PETRIFIED : SystemMessageId.ATTACK_WAS_BLOCKED);
-		else
-			sendPacket(SystemMessage.getSystemMessage(SystemMessageId.YOU_S2_DID_S1_DMG).addNumber(damage).addCharName(target));
-
-		if (isInOlympiadMode() && target.isInstanceOfPlayer() && ((Player) target).isInOlympiadMode() && ((Player) target).getOlympiadGameId() == getOlympiadGameId())
-			OlympiadGameManager.getInstance().notifyCompetitorDamage(this, damage);
-	}
-
-	@Override
 	public void broadcastRelationsChanges() {
-		for (Player player : getKnownType(Player.class)) {
-			final int relation = getRelation(player);
-			final boolean isAutoAttackable = isAutoAttackable(player);
-			player.sendPacket(new RelationChanged(this, relation, isAutoAttackable));
-			
-			if (getPet() != null)
-				player.sendPacket(new RelationChanged(getPet(), relation, isAutoAttackable));
-		}
-	}
-
-	@Override
-	public void sendInfo(Player activeChar) {
-		if (isInBoat())
-			getPosition().set(getBoat().getPosition());
-
-		if (isPolyTypeNPC()) {
-			activeChar.sendPacket(sendMorphInfo());
-		} else {
-			activeChar.sendPacket(new CharInfo(this));
-			
-			if (isSeated()) {
-				final WorldObject object = World.getInstance().getObject(_throneId);
-				
-				if (object instanceof StaticObject)
-					activeChar.sendPacket(new ChairSit(getObjectId(), ((StaticObject) object).getStaticObjectId()));
-			}
-		}
-		
-		int relation = getRelation(activeChar);
-		boolean isAutoAttackable = isAutoAttackable(activeChar);
-		activeChar.sendPacket(new RelationChanged(this, relation, isAutoAttackable));
-		
-		if (getPet() != null)
-			activeChar.sendPacket(new RelationChanged(getPet(), relation, isAutoAttackable));
-
-		relation = activeChar.getRelation(this);
-		isAutoAttackable = activeChar.isAutoAttackable(this);
-		sendPacket(new RelationChanged(activeChar, relation, isAutoAttackable));
-		
-		if (activeChar.getPet() != null)
-			sendPacket(new RelationChanged(activeChar.getPet(), relation, isAutoAttackable));
-
-		if (isInBoat())
-			activeChar.sendPacket(new GetOnVehicle(getObjectId(), getBoat().getObjectId(), getBoatPosition()));
-
-		switch (getStoreType()) {
-			case SELL:
-			case PACKAGE_SELL:
-				activeChar.sendPacket(new PrivateStoreMsgSell(this));
-				return;
-			case BUY:
-				activeChar.sendPacket(new PrivateStoreMsgBuy(this));
-				return;
-			case MANUFACTURE:
-				activeChar.sendPacket(new RecipeShopMsg(this));
-			default:
-				return;
-		}
+		for (Player player : getKnownType(Player.class))
+			sendRelationChangesTo(player);
 	}
 
 	@Override
